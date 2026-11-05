@@ -2,8 +2,13 @@ package com.rpg.entities;
 
 import com.rpg.entities.enums.TipoEfecto;
 
-/** Efecto periodico (DoT o HoT): cambia la vida un valor fijo en cada tick durante cierta duracion. */
-// TALLER ARCHIVOS: candidata a Serializable (los efectos activos de Personaje y de Pocion lo referencian).
+/**
+ * Efecto continuo (DoT / HoT) aplicado a un personaje.
+ *
+ * TALLER CONCURRENCIA: ahora lo consume un hilo (EfectoContinuoTask) mientras otro hilo puede
+ * estar mostrandolo por pantalla, por eso los metodos que tocan "turnosRestantes" son synchronized.
+ * "turnosRestantes" cuenta los ticks que le quedan al efecto.
+ */
 public class EstadoEfecto {
 
     private final String nombre;
@@ -11,22 +16,22 @@ public class EstadoEfecto {
     private final int valorPorTick;
     private int turnosRestantes;
 
-    public EstadoEfecto(String nombre, TipoEfecto tipo, int valorPorTick, int duracion) {
+    public EstadoEfecto(String nombre, TipoEfecto tipo, int valorPorTick, int turnosRestantes) {
         this.nombre = nombre;
         this.tipo = tipo;
         this.valorPorTick = valorPorTick;
-        this.turnosRestantes = duracion;
+        this.turnosRestantes = turnosRestantes;
     }
 
-    public EstadoEfecto copia() {
+    public synchronized EstadoEfecto copia() {
         return new EstadoEfecto(nombre, tipo, valorPorTick, turnosRestantes);
     }
 
-    public void consumirTurno() {
+    public synchronized void consumirTurno() {
         turnosRestantes--;
     }
 
-    public boolean haTerminado() {
+    public synchronized boolean haTerminado() {
         return turnosRestantes <= 0;
     }
 
@@ -42,7 +47,7 @@ public class EstadoEfecto {
         return valorPorTick;
     }
 
-    public int getTurnosRestantes() {
+    public synchronized int getTurnosRestantes() {
         return turnosRestantes;
     }
 }

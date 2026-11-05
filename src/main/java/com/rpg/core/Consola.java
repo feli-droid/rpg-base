@@ -1,8 +1,9 @@
 package com.rpg.core;
 
 import java.util.Scanner;
+import java.util.function.BooleanSupplier;
 
-/** Entrada por teclado con validacion y reintento. */
+/** Lectura por consola con validacion y reintento. */
 public class Consola {
 
     private static final int LARGO_MAXIMO_NOMBRE = 15;
@@ -20,8 +21,21 @@ public class Consola {
     }
 
     public int leerEntero(String mensaje, int minimo, int maximo) {
+        return leerEntero(mensaje, minimo, maximo, () -> false);
+    }
+
+    /**
+     * TALLER CONCURRENCIA: igual que leerEntero, pero con un "cancelado". nextLine() no se puede
+     * interrumpir desde otro hilo, asi que cuando el temporizador del turno ya vencio, en cuanto
+     * el jugador pulsa ENTER se devuelve de inmediato (sin pedir otra vez un numero valido) y el
+     * llamador descarta el valor.
+     */
+    public int leerEntero(String mensaje, int minimo, int maximo, BooleanSupplier cancelado) {
         while (true) {
             String texto = leerLinea(mensaje);
+            if (cancelado.getAsBoolean()) {
+                return minimo;
+            }
             if (texto.isEmpty()) {
                 System.out.println("No escribiste nada.");
                 continue;
@@ -43,13 +57,17 @@ public class Consola {
             String nombre = leerLinea(mensaje);
             if (nombre.isEmpty()) {
                 System.out.println("El nombre no puede estar vacio.");
-            } else if (nombre.length() > LARGO_MAXIMO_NOMBRE) {
-                System.out.println("Maximo " + LARGO_MAXIMO_NOMBRE + " caracteres.");
-            } else if (!nombre.matches(PATRON_NOMBRE)) {
-                System.out.println("Usa solo letras, numeros y espacios.");
-            } else {
-                return nombre;
+                continue;
             }
+            if (nombre.length() > LARGO_MAXIMO_NOMBRE) {
+                System.out.println("Maximo " + LARGO_MAXIMO_NOMBRE + " caracteres.");
+                continue;
+            }
+            if (!nombre.matches(PATRON_NOMBRE)) {
+                System.out.println("Usa solo letras, numeros y espacios.");
+                continue;
+            }
+            return nombre;
         }
     }
 }

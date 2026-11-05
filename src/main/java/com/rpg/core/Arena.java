@@ -6,7 +6,14 @@ import com.rpg.exceptions.VidaInsuficienteException;
 
 import java.util.Random;
 
-/** Reglas de un combate: ataques, habilidades, efectos al inicio del turno y duelos automaticos. */
+/**
+ * Reglas del combate: ataque, habilidad especial, inicio de turno y duelo automatico.
+ *
+ * TALLER CONCURRENCIA: los efectos continuos ya no se procesan aqui turno a turno; cada uno corre
+ * en su propio hilo (EfectoContinuoTask). La Arena solo los prepara (observador) y los cancela
+ * cuando el duelo termina. Random es seguro para varios hilos, asi que dos semifinales pueden
+ * compartir la misma Arena.
+ */
 public class Arena {
 
     private static final int PROBABILIDAD_CRITICO = 15;
@@ -14,6 +21,8 @@ public class Arena {
     private static final int VARIACION_DANIO = 3;
     private static final int PROBABILIDAD_ESPECIAL_IA = 35;
     private static final int MAXIMO_RONDAS = 40;
+    /** Pausa entre rondas de un duelo automatico: deja que los efectos (en tiempo real) hagan efecto. */
+    private static final long PAUSA_RONDA_MS = 500;
 
     private final RegistroCombate registro;
     private final Random azar;
@@ -23,14 +32,11 @@ public class Arena {
         this.azar = azar;
     }
 
-    /** Procesa efectos y aturdimiento. @return true si el personaje puede actuar este turno */
+    /** Devuelve true si el personaje puede actuar en este turno. */
     public boolean iniciarTurno(Personaje personaje) {
         personaje.alIniciarTurno();
-        for (String mensaje : personaje.procesarEfectos()) {
-            registro.agregar(mensaje);
-        }
+        // Los DoT / HoT corren en sus propios hilos y ya avisaron en el registro si hubo muerte.
         if (!personaje.estaVivo()) {
-            registro.agregar("%s cae derrotado por sus efectos", personaje.getNombre());
             return false;
         }
         if (personaje.consumirAturdimiento()) {
@@ -43,15 +49,14 @@ public class Arena {
     public void atacar(Personaje atacante, Personaje defensor) {
         boolean critico = azar.nextInt(100) < PROBABILIDAD_CRITICO;
         double factor = critico ? FACTOR_CRITICO : 1.0;
-        int danioBruto = (int) Math.round(atacante.calcularDanio() * factor) + azar.nextInt(VARIACION_DANIO + 1);
+        int danio = (int) Math.round(atacante.calcularDanio() * factor) + azar.nextInt(VARIACION_DANIO + 1);
         int vidaAntes = defensor.getVida();
-        defensor.defender(danioBruto);
+        defensor.defender(danio);
         registro.agregar("%s ataca a %s%s y causa %d de dano", atacante.getNombre(), defensor.getNombre(),
                 critico ? " (CRITICO)" : "", vidaAntes - defensor.getVida());
         registro.agregar("   %s", FormatoCombate.resumen(defensor));
     }
 
-    /** @return true si el especial se ejecuto; false si fallo por falta de mana o de vida */
     public boolean intentarEspecial(Personaje atacante, Personaje defensor) {
         try {
             registro.agregar(atacante.realizarAtaqueEspecial(defensor));
@@ -63,25 +68,49 @@ public class Arena {
         }
     }
 
-    /** Turno completo controlado por el programa (enemigos y gladiadores). */
-    public void turnoAutomatico(Personaje atacante, Personaje defensor) {
-        if (!atacante.estaVivo() || !defensor.estaVivo() || !iniciarTurno(atacante)) {
+    public void turnoAutomatico(Personaje actual, Personaje rival) {
+        if (!(actual.estaVivo() && rival.estaVivo() && iniciarTurno(actual))) {
             return;
         }
-        boolean quiereEspecial = azar.nextInt(100) < PROBABILIDAD_ESPECIAL_IA;
-        if (quiereEspecial && intentarEspecial(atacante, defensor)) {
+        boolean usaEspecial = azar.nextInt(100) < PROBABILIDAD_ESPECIAL_IA;
+        if (usaEspecial && intentarEspecial(actual, rival)) {
             return;
         }
-        atacar(atacante, defensor);
+        atacar(actual, rival);
     }
 
-    /** Pelea hasta que uno cae (o se acaban las rondas). @return el ganador */
+    /**
+     * Duelo automatico. Se puede ejecutar en un hilo propio (las semifinales corren en paralelo).
+     * Al terminar, cancela los efectos que sigan activos para que sus hilos acaben limpios.
+     */
     public Personaje duelo(Personaje a, Personaje b) {
-        for (int ronda = 1; ronda <= MAXIMO_RONDAS && a.estaVivo() && b.estaVivo(); ronda++) {
-            registro.agregar("-- Ronda %d --", ronda);
-            turnoAutomatico(a, b);
-            turnoAutomatico(b, a);
+        a.setObservador(registro::agregar);
+        b.setObservador(registro::agregar);
+        try {
+            for (int ronda = 1; ronda <= MAXIMO_RONDAS && a.estaVivo() && b.estaVivo(); ronda++) {
+                registro.agregar("-- Ronda %d (%s vs %s) --", ronda, a.getNombre(), b.getNombre());
+                turnoAutomatico(a, b);
+                turnoAutomatico(b, a);
+                if (!pausarRonda()) {
+                    break;
+                }
+            }
+        } finally {
+            a.cancelarEfectos();
+            b.cancelarEfectos();
         }
         return a.getVida() >= b.getVida() ? a : b;
+    }
+
+    /** @return false si el hilo fue interrumpido (el duelo se detiene). */
+    private boolean pausarRonda() {
+        try {
+            Thread.sleep(PAUSA_RONDA_MS);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            registro.agregar("Duelo interrumpido.");
+            return false;
+        }
     }
 }

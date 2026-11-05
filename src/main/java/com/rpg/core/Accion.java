@@ -6,5 +6,7 @@ public enum Accion {
     ESPECIAL,
     POCION,
     ESTADO,
-    HUIR
+    HUIR,
+    /** TALLER CONCURRENCIA: el temporizador se agoto antes de que el jugador eligiera, el turno se pierde. */
+    TIEMPO_AGOTADO
 }

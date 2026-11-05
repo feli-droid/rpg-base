@@ -6,12 +6,16 @@ import com.rpg.core.MotorJuego;
 import java.util.NoSuchElementException;
 import java.util.Scanner;
 
+/** Menu principal por consola. */
 public class Main {
 
     public static void main(String[] args) {
         try (Scanner scanner = new Scanner(System.in)) {
             Consola consola = new Consola(scanner);
             MotorJuego motor = new MotorJuego(consola);
+            // TALLER CONCURRENCIA: hilo daemon de auto-guardado. Al salir del juego la JVM se cierra
+            // aunque este hilo siga vivo, porque es daemon.
+            motor.iniciarAutoGuardado();
             ejecutarMenu(consola, motor);
         } catch (NoSuchElementException e) {
             System.out.println("\nEntrada finalizada. Hasta luego.");
@@ -22,8 +26,6 @@ public class Main {
         int opcion;
         do {
             mostrarMenu();
-            // TALLER ARCHIVOS: aqui podrias ofrecer "Cargar partida" (y ver/borrar archivos con File), leyendo
-            // el archivo con ObjectInputStream y delegando en el motor. Hoy el menu solo llega hasta la opcion 3.
             opcion = consola.leerEntero("Opcion: ", 0, 3);
             switch (opcion) {
                 case 1 -> motor.combateRapido();

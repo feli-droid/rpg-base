@@ -1,5 +1,7 @@
 package com.rpg.core;
 
+import com.rpg.concurrency.AutoGuardadoDaemon;
+import com.rpg.concurrency.GestorTurno;
 import com.rpg.entities.Enemigo;
 import com.rpg.entities.EstadoEfecto;
 import com.rpg.entities.Gremio;
@@ -16,11 +18,23 @@ import com.rpg.items.Pocion;
 import java.util.List;
 import java.util.Random;
 
-/** Coordina el flujo del juego: crear heroe, combatir, torneo, bestiario y guardado. */
+/**
+ * Flujo del juego: crear heroe, bucle de combate, resultado y guardado del progreso.
+ *
+ * TALLER CONCURRENCIA:
+ *  - pedirAccion() usa un temporizador de turno en su propio hilo (GestorTurno).
+ *  - Los efectos DoT / HoT corren en hilos; el combate los cancela al terminar.
+ *  - Un hilo daemon (AutoGuardadoDaemon) guarda el progreso en memoria cada cierto tiempo, por eso
+ *    el estado compartido (perfil, gremio, bestiario) se toca siempre con el candado "candadoEstado".
+ */
 public class MotorJuego {
 
     private static final String NOMBRE_GREMIO = "Guardianes del Alba";
     private static final int CURACION_POCION_VIDA = 30;
+    /** Segundos que tiene el jugador para elegir su accion. */
+    private static final int SEGUNDOS_TURNO = 15;
+    /** Cada cuantos milisegundos guarda el hilo daemon. */
+    private static final long INTERVALO_AUTOGUARDADO_MS = 30_000;
 
     private final Consola consola;
     private final RegistroCombate registro = new RegistroCombate();
@@ -29,24 +43,36 @@ public class MotorJuego {
     private final PerfilJugador perfil = new PerfilJugador();
     private final Gremio gremio = new Gremio(NOMBRE_GREMIO);
     private final TorneoManager torneo = new TorneoManager(arena, registro);
-    // TALLER ARCHIVOS: ultimoGuardado es solo el estado de la partida en memoria. Aqui (o en un metodo
-    // nuevo como cargarProgreso) iria la carga de una partida guardada en disco; llamala desde Main.
-    private String ultimoGuardado = "";
+
+    /** Candado del estado de la partida (perfil, gremio, bestiario): lo comparten el hilo principal y el daemon. */
+    private final Object candadoEstado = new Object();
+    private volatile String ultimoGuardado = "";
 
     public MotorJuego(Consola consola) {
         this.consola = consola;
     }
 
-    // ---- opciones del menu principal
+    // ------------------------------------------------------------------------------------
+    // Opciones del menu
+    // ------------------------------------------------------------------------------------
 
     public void combateRapido() {
         registro.limpiar();
         Personaje jugador = crearJugador();
         Enemigo enemigo = elegirEnemigo();
+        jugador.setObservador(registro::agregar);
+        enemigo.setObservador(registro::agregar);
         registro.agregar("%n=== %s vs %s ===", jugador.getNombre(), enemigo.getNombre());
 
-        boolean huyo = combatir(jugador, enemigo);
-
+        boolean huyo;
+        try {
+            huyo = combatir(jugador, enemigo);
+        } finally {
+            // Termine como termine el combate (victoria, derrota, huida o error), los hilos de los
+            // efectos se interrumpen y terminan limpios.
+            jugador.cancelarEfectos();
+            enemigo.cancelarEfectos();
+        }
         cerrarCombate(jugador, enemigo, huyo);
         guardarProgreso();
     }
@@ -54,35 +80,47 @@ public class MotorJuego {
     public void jugarTorneo() {
         registro.limpiar();
         Personaje campeon = torneo.jugarTorneo();
+        if (campeon == null) {
+            registro.agregar("%nEl torneo se cancelo antes de terminar.");
+            return;
+        }
         registro.agregar("%nCAMPEON DEL TORNEO: %s", campeon.getNombre());
-        perfil.desbloquearLogro("Campeon del Torneo");
+        synchronized (candadoEstado) {
+            perfil.desbloquearLogro("Campeon del Torneo");
+        }
         guardarProgreso();
     }
 
     public void mostrarBestiario() {
         System.out.println("\n=== BESTIARIO ===");
-        System.out.print(bestiario.describir());
-        System.out.printf("Victorias: %d | Derrotas: %d | Logros: %s%n",
-                perfil.getVictorias(), perfil.getDerrotas(), perfil.getLogros());
+        synchronized (candadoEstado) {
+            System.out.print(bestiario.describir());
+            System.out.printf("Victorias: %d | Derrotas: %d | Logros: %s%n",
+                    perfil.getVictorias(), perfil.getDerrotas(), perfil.getLogros());
+        }
     }
 
-    // ---- creacion de personajes
+    // ------------------------------------------------------------------------------------
+    // Creacion del heroe y del rival
+    // ------------------------------------------------------------------------------------
 
     private Personaje crearJugador() {
         int clase = consola.leerEntero("Clase (1. Guerrero, 2. Mago): ", 1, 2);
         String nombre = consola.leerNombre("Nombre del heroe: ");
-        Personaje jugador = switch (clase) {
+        Personaje heroe = switch (clase) {
             case 1 -> new Guerrero(nombre);
             default -> new Mago(nombre);
         };
-        entregarKitInicial(jugador);
-        jugador.unirseAGremio(gremio);
-        System.out.printf("%s se une al gremio %s (%d miembros).%n",
-                jugador.getNombre(), gremio.getNombre(), gremio.getMiembros().size());
-        return jugador;
+        entregarKitInicial(heroe);
+        synchronized (candadoEstado) {
+            heroe.unirseAGremio(gremio);
+            System.out.printf("%s se une al gremio %s (%d miembros).%n",
+                    heroe.getNombre(), gremio.getNombre(), gremio.getMiembros().size());
+        }
+        return heroe;
     }
 
-    private void entregarKitInicial(Personaje jugador) {
+    private void entregarKitInicial(Personaje personaje) {
         List<Pocion> kit = List.of(
                 new Pocion("Pocion de Vida", CURACION_POCION_VIDA, RaridadItem.COMUN),
                 new Pocion("Elixir de Regeneracion", 0, RaridadItem.RARO,
@@ -90,7 +128,7 @@ public class MotorJuego {
                 new Pocion("Antidoto", 0, RaridadItem.COMUN, null, true));
         try {
             for (Pocion pocion : kit) {
-                jugador.getInventario().agregar(pocion);
+                personaje.getInventario().agregar(pocion);
             }
         } catch (CapacidadExcedidaException e) {
             System.out.println("No se pudo entregar todo el kit: " + e.getMessage());
@@ -103,14 +141,11 @@ public class MotorJuego {
         for (int i = 0; i < nombres.size(); i++) {
             System.out.printf("  %d. %s%n", i + 1, nombres.get(i));
         }
-        while (true) {
-            String texto = consola.leerLinea("Rival (numero o nombre): ");
-            Enemigo enemigo = resolverRival(texto, nombres);
-            if (enemigo != null) {
-                return enemigo;
-            }
+        Enemigo enemigo;
+        while ((enemigo = resolverRival(consola.leerLinea("Rival (numero o nombre): "), nombres)) == null) {
             System.out.println("No existe ese rival.");
         }
+        return enemigo;
     }
 
     private Enemigo resolverRival(String texto, List<String> nombres) {
@@ -123,9 +158,11 @@ public class MotorJuego {
         }
     }
 
-    // ---- bucle de combate
+    // ------------------------------------------------------------------------------------
+    // Bucle de combate
+    // ------------------------------------------------------------------------------------
 
-    /** @return true si el jugador huyo */
+    /** @return true si el jugador huyo. */
     private boolean combatir(Personaje jugador, Enemigo enemigo) {
         int ronda = 1;
         while (jugador.estaVivo() && enemigo.estaVivo()) {
@@ -139,43 +176,60 @@ public class MotorJuego {
         return false;
     }
 
-    /**
-     * Turno del jugador. Las acciones que no gastan turno (ver estado, cancelar) vuelven a pedir.
-     * @return true si el jugador decidio huir
-     */
+    /** @return true si el jugador huyo. */
     private boolean turnoJugador(Personaje jugador, Enemigo enemigo) {
-        boolean turnoGastado;
+        boolean turnoConsumido;
         do {
             registro.agregar(FormatoCombate.resumen(jugador));
             registro.agregar(FormatoCombate.resumen(enemigo));
             Accion accion = pedirAccion();
+            if (!jugador.estaVivo()) {
+                return false;                       // murio por un efecto mientras elegia
+            }
             if (accion == Accion.HUIR) {
                 return true;
             }
-            turnoGastado = switch (accion) {
+            turnoConsumido = switch (accion) {
                 case ATACAR -> {
                     arena.atacar(jugador, enemigo);
                     yield true;
                 }
                 case ESPECIAL -> arena.intentarEspecial(jugador, enemigo);
                 case POCION -> usarPocion(jugador);
+                case TIEMPO_AGOTADO -> {
+                    registro.agregar("%s tardo demasiado y pierde el turno.", jugador.getNombre());
+                    yield true;
+                }
                 default -> {
                     mostrarEstado(jugador);
                     yield false;
                 }
             };
-        } while (!turnoGastado && enemigo.estaVivo());
+        } while (!turnoConsumido && enemigo.estaVivo() && jugador.estaVivo());
         return false;
     }
 
     /**
-     * Pide la accion al jugador y se queda esperando hasta que escriba algo.
+     * TALLER CONCURRENCIA (Seccion 1): pide la accion con un temporizador de SEGUNDOS_TURNO segundos.
+     *
+     * El temporizador corre en otro hilo mientras este hilo espera al teclado (nextLine() no se puede
+     * interrumpir). Si el jugador responde a tiempo, se cancela el temporizador con interrupt(). Si el
+     * tiempo se agota primero, el turno se pierde en cuanto el jugador pulse ENTER.
      */
     private Accion pedirAccion() {
-        // TALLER CONCURRENCIA: esta lectura bloquea el programa sin limite de tiempo.
-        // Aqui debe entrar el temporizador de turno con su callback.
-        System.out.println("1. Atacar  2. Habilidad especial  3. Usar pocion  4. Ver estado  0. Huir");
-        int opcion = consola.leerEntero("Accion: ", 0, 4);
+        System.out.printf("1. Atacar  2. Habilidad especial  3. Usar pocion  4. Ver estado  0. Huir"
+                + "  (tienes %d s)%n", SEGUNDOS_TURNO);
+        GestorTurno temporizador = new GestorTurno();
+        temporizador.iniciar(SEGUNDOS_TURNO);
+        int opcion;
+        try {
+            opcion = consola.leerEntero("Accion: ", 0, 4, temporizador::isTiempoAgotado);
+        } finally {
+            temporizador.cancelar();                // respondio (o fallo la lectura): se interrumpe el hilo
+        }
+        if (temporizador.isTiempoAgotado()) {
+            return Accion.TIEMPO_AGOTADO;
+        }
         return switch (opcion) {
             case 1 -> Accion.ATACAR;
             case 2 -> Accion.ESPECIAL;
@@ -185,8 +239,8 @@ public class MotorJuego {
         };
     }
 
-    private boolean usarPocion(Personaje jugador) {
-        Inventario<Pocion> inventario = jugador.getInventario();
+    private boolean usarPocion(Personaje personaje) {
+        Inventario<Pocion> inventario = personaje.getInventario();
         if (inventario.estaVacio()) {
             System.out.println("No tienes pociones.");
             return false;
@@ -199,42 +253,47 @@ public class MotorJuego {
         if (eleccion == 0) {
             return false;
         }
-        registro.agregar(jugador.usarPocion(inventario.quitar(eleccion - 1)));
+        registro.agregar(personaje.usarPocion(inventario.quitar(eleccion - 1)));
         return true;
     }
 
-    private void mostrarEstado(Personaje jugador) {
+    private void mostrarEstado(Personaje personaje) {
         System.out.printf("Habilidades: %s | Arma: %s | Defensa: %d | Pociones: %d%n",
-                jugador.getHabilidades(),
-                jugador.getArma() != null ? jugador.getArma().getNombre() : "ninguna",
-                jugador.getDefensa(), jugador.getInventario().tamanio());
-        for (EstadoEfecto efecto : jugador.getEfectos()) {
-            System.out.printf("Efecto activo: %s (%d turnos)%n", efecto.getNombre(), efecto.getTurnosRestantes());
+                personaje.getHabilidades(),
+                personaje.getArma() != null ? personaje.getArma().getNombre() : "ninguna",
+                personaje.getDefensa(),
+                personaje.getInventario().tamanio());
+        for (EstadoEfecto efecto : personaje.getEfectos()) {
+            System.out.printf("Efecto activo: %s (%d ticks restantes)%n", efecto.getNombre(), efecto.getTurnosRestantes());
         }
     }
 
-    // ---- resultado del combate
+    // ------------------------------------------------------------------------------------
+    // Resultado del combate
+    // ------------------------------------------------------------------------------------
 
     private void cerrarCombate(Personaje jugador, Enemigo enemigo, boolean huyo) {
-        if (huyo) {
-            registro.agregar("%s huye del combate.", jugador.getNombre());
-        } else if (jugador.estaVivo()) {
-            registro.agregar("%nVictoria de %s!", jugador.getNombre());
-            perfil.registrarVictoria();
-            bestiario.registrarEnemigoDerrotado(enemigo.getNombre());
-            desbloquearLogros(jugador, enemigo);
-            repartirBotin(jugador);
-        } else {
-            registro.agregar("%n%s ha caido ante %s.", jugador.getNombre(), enemigo.getNombre());
-            perfil.registrarDerrota();
+        synchronized (candadoEstado) {
+            if (huyo) {
+                registro.agregar("%s huye del combate.", jugador.getNombre());
+            } else if (jugador.estaVivo()) {
+                registro.agregar("%nVictoria de %s!", jugador.getNombre());
+                perfil.registrarVictoria();
+                bestiario.registrarEnemigoDerrotado(enemigo.getNombre());
+                desbloquearLogros(jugador, enemigo);
+                repartirBotin(jugador);
+            } else {
+                registro.agregar("%n%s ha caido ante %s.", jugador.getNombre(), enemigo.getNombre());
+                perfil.registrarDerrota();
+            }
         }
     }
 
     private void desbloquearLogros(Personaje jugador, Enemigo enemigo) {
-        boolean intacto = jugador.getVida() == jugador.getVidaMaxima();
-        List<String> candidatos = List.of("Primera Victoria", "Cazador de " + enemigo.getNombre(),
-                intacto ? "Intocable" : "");
-        for (String logro : candidatos) {
+        boolean intocable = jugador.getVida() == jugador.getVidaMaxima();
+        List<String> logros = List.of("Primera Victoria", "Cazador de " + enemigo.getNombre(),
+                intocable ? "Intocable" : "");
+        for (String logro : logros) {
             if (!logro.isEmpty() && perfil.desbloquearLogro(logro)) {
                 registro.agregar("Logro desbloqueado: %s", logro);
             }
@@ -250,28 +309,56 @@ public class MotorJuego {
         }
     }
 
-    // ---- guardado
+    // ------------------------------------------------------------------------------------
+    // Guardado (en memoria)
+    // ------------------------------------------------------------------------------------
 
     /**
-     * Guarda las estadisticas en memoria (el texto queda en {@code ultimoGuardado}); aun no se escribe ningun
-     * archivo. Hoy solo se invoca al terminar una pelea.
+     * TALLER CONCURRENCIA (Seccion 4): arranca el hilo daemon de auto-guardado.
+     * Lo llama Main una sola vez al empezar.
      */
+    public Thread iniciarAutoGuardado() {
+        return new AutoGuardadoDaemon(this, INTERVALO_AUTOGUARDADO_MS).iniciar();
+    }
+
+    /** Guardado manual: se invoca al terminar una pelea o un torneo. */
     public void guardarProgreso() {
-        // TALLER ARCHIVOS: ademas de dejar el texto en memoria, escribe la partida en disco (por ejemplo un
-        // .txt con BufferedWriter, y/o un .dat serializando el estado con ObjectOutputStream). Usa try-with-resources.
-        // TALLER CONCURRENCIA: este guardado es manual. Debera hacerse solo, de fondo, mientras se juega.
-        StringBuilder contenido = new StringBuilder();
-        contenido.append("=== PARTIDA RPG ===").append(System.lineSeparator());
-        contenido.append("Victorias: ").append(perfil.getVictorias()).append(System.lineSeparator());
-        contenido.append("Derrotas: ").append(perfil.getDerrotas()).append(System.lineSeparator());
-        contenido.append("Logros: ").append(String.join(", ", perfil.getLogros())).append(System.lineSeparator());
-        contenido.append("Gremio ").append(gremio.getNombre()).append(": ")
-                .append(gremio.getMiembros().size()).append(" miembros").append(System.lineSeparator());
-        contenido.append("Enemigos derrotados: ").append(bestiario.resumenDerrotados()).append(System.lineSeparator());
-        contenido.append(System.lineSeparator()).append("--- Ultimo combate ---").append(System.lineSeparator());
-        contenido.append(registro.getTexto());
-        ultimoGuardado = contenido.toString();
-        System.out.println("[Progreso guardado en memoria]");
+        guardarEnMemoria("[Progreso guardado en memoria]");
+    }
+
+    /** Guardado automatico: lo invoca el hilo daemon cada cierto intervalo. */
+    public void autoGuardar() {
+        guardarEnMemoria("[Autoguardado en memoria]");
+    }
+
+    private void guardarEnMemoria(String aviso) {
+        String resumen;
+        synchronized (candadoEstado) {
+            resumen = construirResumen();
+        }
+        ultimoGuardado = resumen;
+        System.out.println(aviso);
+    }
+
+    // TALLER ARCHIVOS: este String en memoria es el "estado de la partida"; el taller de archivos lo lleva a disco.
+    private String construirResumen() {
+        String salto = System.lineSeparator();
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== PARTIDA RPG ===").append(salto);
+        sb.append("Victorias: ").append(perfil.getVictorias()).append(salto);
+        sb.append("Derrotas: ").append(perfil.getDerrotas()).append(salto);
+        sb.append("Logros: ").append(String.join(", ", perfil.getLogros())).append(salto);
+        sb.append("Gremio ").append(gremio.getNombre()).append(": ")
+                .append(gremio.getMiembros().size()).append(" miembros").append(salto);
+        for (Personaje miembro : gremio.getMiembros()) {
+            sb.append(String.format("  - %s (%s) vida %d/%d, estado %s",
+                    miembro.getNombre(), miembro.getTipo(), miembro.getVida(),
+                    miembro.getVidaMaxima(), miembro.getEstado())).append(salto);
+        }
+        sb.append("Enemigos derrotados: ").append(bestiario.resumenDerrotados()).append(salto);
+        sb.append(salto).append("--- Ultimo combate ---").append(salto);
+        sb.append(registro.getTexto());
+        return sb.toString();
     }
 
     public String getUltimoGuardado() {
