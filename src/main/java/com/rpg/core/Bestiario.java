@@ -9,7 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Catalogo de monstruos (Map nombre -> plantilla) y contador de derrotas por monstruo. */
+/** Catalogo de monstruos (Map) y contador de derrotas por monstruo. */
 public class Bestiario {
 
     private final Map<String, Enemigo> catalogo = new LinkedHashMap<>();
@@ -32,7 +32,6 @@ public class Bestiario {
         return new ArrayList<>(catalogo.keySet());
     }
 
-    /** Busca ignorando mayusculas (equalsIgnoreCase, nunca ==). @return copia nueva o null si no existe */
     public Enemigo crearEnemigo(String nombre) {
         for (Map.Entry<String, Enemigo> entrada : catalogo.entrySet()) {
             if (entrada.getKey().equalsIgnoreCase(nombre)) {
@@ -48,6 +47,15 @@ public class Bestiario {
 
     public int vecesDerrotado(String nombre) {
         return derrotados.getOrDefault(nombre, 0);
+    }
+
+    public Map<String, Integer> exportarDerrotados() {
+        return new LinkedHashMap<>(derrotados);
+    }
+
+    public void importarDerrotados(Map<String, Integer> datos) {
+        derrotados.clear();
+        derrotados.putAll(datos);
     }
 
     public String describir() {

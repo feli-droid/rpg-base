@@ -14,19 +14,17 @@ import com.rpg.entities.enums.TipoEfecto;
 import com.rpg.exceptions.CapacidadExcedidaException;
 import com.rpg.items.Inventario;
 import com.rpg.items.Pocion;
+import com.rpg.persistencia.GestorArchivos;
+import com.rpg.persistencia.GestorPartida;
+import com.rpg.persistencia.LogCombate;
+import com.rpg.persistencia.PartidaGuardada;
 
+import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 
-/**
- * Flujo del juego: crear heroe, bucle de combate, resultado y guardado del progreso.
- *
- * TALLER CONCURRENCIA:
- *  - pedirAccion() usa un temporizador de turno en su propio hilo (GestorTurno).
- *  - Los efectos DoT / HoT corren en hilos; el combate los cancela al terminar.
- *  - Un hilo daemon (AutoGuardadoDaemon) guarda el progreso en memoria cada cierto tiempo, por eso
- *    el estado compartido (perfil, gremio, bestiario) se toca siempre con el candado "candadoEstado".
- */
 public class MotorJuego {
 
     private static final String NOMBRE_GREMIO = "Guardianes del Alba";
@@ -40,8 +38,12 @@ public class MotorJuego {
     private final RegistroCombate registro = new RegistroCombate();
     private final Arena arena = new Arena(registro, new Random());
     private final Bestiario bestiario = new Bestiario();
-    private final PerfilJugador perfil = new PerfilJugador();
-    private final Gremio gremio = new Gremio(NOMBRE_GREMIO);
+    // No son final: al cargar una partida se reemplazan por los objetos deserializados.
+    // Se leen y escriben siempre con candadoEstado tomado.
+    private PerfilJugador perfil = new PerfilJugador();
+    private Gremio gremio = new Gremio(NOMBRE_GREMIO);
+    /** true si el estado actual viene de una partida cargada: entonces se ofrece continuar con sus heroes. */
+    private boolean partidaCargada = false;
     private final TorneoManager torneo = new TorneoManager(arena, registro);
 
     /** Candado del estado de la partida (perfil, gremio, bestiario): lo comparten el hilo principal y el daemon. */
@@ -52,14 +54,11 @@ public class MotorJuego {
         this.consola = consola;
     }
 
-    // ------------------------------------------------------------------------------------
-    // Opciones del menu
-    // ------------------------------------------------------------------------------------
-
     public void combateRapido() {
         registro.limpiar();
-        Personaje jugador = crearJugador();
+        Personaje jugador = elegirOCrearHeroe();
         Enemigo enemigo = elegirEnemigo();
+        jugador.reanudarEfectos();      // si el heroe se guardo con un efecto activo, vuelve a correr
         jugador.setObservador(registro::agregar);
         enemigo.setObservador(registro::agregar);
         registro.agregar("%n=== %s vs %s ===", jugador.getNombre(), enemigo.getNombre());
@@ -75,6 +74,7 @@ public class MotorJuego {
         }
         cerrarCombate(jugador, enemigo, huyo);
         guardarProgreso();
+        guardarHistorial();
     }
 
     public void jugarTorneo() {
@@ -89,6 +89,7 @@ public class MotorJuego {
             perfil.desbloquearLogro("Campeon del Torneo");
         }
         guardarProgreso();
+        guardarHistorial();
     }
 
     public void mostrarBestiario() {
@@ -100,9 +101,29 @@ public class MotorJuego {
         }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Creacion del heroe y del rival
-    // ------------------------------------------------------------------------------------
+    private Personaje elegirOCrearHeroe() {
+        List<Personaje> disponibles = new ArrayList<>();
+        synchronized (candadoEstado) {
+            if (partidaCargada) {
+                for (Personaje miembro : gremio.getMiembros()) {
+                    if (miembro.estaVivo()) {
+                        disponibles.add(miembro);
+                    }
+                }
+            }
+        }
+        if (disponibles.isEmpty()) {
+            return crearJugador();
+        }
+        System.out.println("Heroes del gremio guardado:");
+        for (int i = 0; i < disponibles.size(); i++) {
+            Personaje h = disponibles.get(i);
+            System.out.printf("  %d. %s (%s) vida %d/%d, %d pociones%n", i + 1, h.getNombre(), h.getTipo(),
+                    h.getVida(), h.getVidaMaxima(), h.getInventario().tamanio());
+        }
+        int eleccion = consola.leerEntero("Heroe del gremio (0 = crear uno nuevo): ", 0, disponibles.size());
+        return eleccion == 0 ? crearJugador() : disponibles.get(eleccion - 1);
+    }
 
     private Personaje crearJugador() {
         int clase = consola.leerEntero("Clase (1. Guerrero, 2. Mago): ", 1, 2);
@@ -158,11 +179,6 @@ public class MotorJuego {
         }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Bucle de combate
-    // ------------------------------------------------------------------------------------
-
-    /** @return true si el jugador huyo. */
     private boolean combatir(Personaje jugador, Enemigo enemigo) {
         int ronda = 1;
         while (jugador.estaVivo() && enemigo.estaVivo()) {
@@ -209,13 +225,6 @@ public class MotorJuego {
         return false;
     }
 
-    /**
-     * TALLER CONCURRENCIA (Seccion 1): pide la accion con un temporizador de SEGUNDOS_TURNO segundos.
-     *
-     * El temporizador corre en otro hilo mientras este hilo espera al teclado (nextLine() no se puede
-     * interrumpir). Si el jugador responde a tiempo, se cancela el temporizador con interrupt(). Si el
-     * tiempo se agota primero, el turno se pierde en cuanto el jugador pulse ENTER.
-     */
     private Accion pedirAccion() {
         System.out.printf("1. Atacar  2. Habilidad especial  3. Usar pocion  4. Ver estado  0. Huir"
                 + "  (tienes %d s)%n", SEGUNDOS_TURNO);
@@ -268,10 +277,6 @@ public class MotorJuego {
         }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Resultado del combate
-    // ------------------------------------------------------------------------------------
-
     private void cerrarCombate(Personaje jugador, Enemigo enemigo, boolean huyo) {
         synchronized (candadoEstado) {
             if (huyo) {
@@ -309,14 +314,6 @@ public class MotorJuego {
         }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Guardado (en memoria)
-    // ------------------------------------------------------------------------------------
-
-    /**
-     * TALLER CONCURRENCIA (Seccion 4): arranca el hilo daemon de auto-guardado.
-     * Lo llama Main una sola vez al empezar.
-     */
     public Thread iniciarAutoGuardado() {
         return new AutoGuardadoDaemon(this, INTERVALO_AUTOGUARDADO_MS).iniciar();
     }
@@ -326,9 +323,22 @@ public class MotorJuego {
         guardarEnMemoria("[Progreso guardado en memoria]");
     }
 
-    /** Guardado automatico: lo invoca el hilo daemon cada cierto intervalo. */
+    /** Guardado automatico en MEMORIA: lo invoca el hilo daemon cada cierto intervalo. */
     public void autoGuardar() {
         guardarEnMemoria("[Autoguardado en memoria]");
+    }
+
+    public void autoGuardarEnDisco() {
+        boolean escrito;
+        synchronized (candadoEstado) {
+            if (gremio.getMiembros().isEmpty() && perfil.getVictorias() == 0 && perfil.getDerrotas() == 0) {
+                return;
+            }
+            escrito = GestorPartida.guardarAutomatico(crearInstantanea());
+        }
+        if (escrito) {
+            System.out.println("[Autoguardado en disco: " + GestorArchivos.ARCHIVO_AUTOGUARDADO.getPath() + "]");
+        }
     }
 
     private void guardarEnMemoria(String aviso) {
@@ -340,7 +350,7 @@ public class MotorJuego {
         System.out.println(aviso);
     }
 
-    // TALLER ARCHIVOS: este String en memoria es el "estado de la partida"; el taller de archivos lo lleva a disco.
+    // Resumen legible del estado (en memoria). El estado REAL a disco se guarda con PartidaGuardada (serializacion).
     private String construirResumen() {
         String salto = System.lineSeparator();
         StringBuilder sb = new StringBuilder();
@@ -359,6 +369,115 @@ public class MotorJuego {
         sb.append(salto).append("--- Ultimo combate ---").append(salto);
         sb.append(registro.getTexto());
         return sb.toString();
+    }
+
+    /** Agrega el registro del combate que acaba de terminar al historial en disco. */
+    private void guardarHistorial() {
+        if (LogCombate.agregar(registro.getTexto())) {
+            System.out.println("[Historial agregado a " + GestorArchivos.ARCHIVO_LOG.getPath() + "]");
+        }
+    }
+
+    public void verHistorial() {
+        LogCombate.mostrar();
+    }
+
+    /** "Foto" del estado actual. Hay que llamarla con candadoEstado tomado (el grafo se lee mientras se serializa). */
+    private PartidaGuardada crearInstantanea() {
+        return new PartidaGuardada(perfil, gremio, bestiario.exportarDerrotados());
+    }
+
+    /** Guardado manual en partidas/partida.dat (pide confirmacion si ya existe una partida). */
+    public void guardarPartida() {
+        File destino = GestorArchivos.ARCHIVO_PARTIDA;
+        if (destino.exists() && !confirmar("Ya existe una partida guardada. Sobrescribirla?")) {
+            System.out.println("Guardado cancelado.");
+            return;
+        }
+        boolean guardada;
+        synchronized (candadoEstado) {
+            guardada = GestorPartida.guardar(crearInstantanea(), destino);
+        }
+        if (guardada) {
+            System.out.printf("Partida guardada en %s (%d bytes).%n", destino.getPath(), destino.length());
+        } else {
+            System.out.println("No se pudo guardar la partida. Tu partida anterior (si habia) sigue intacta.");
+        }
+    }
+
+    /** Carga la partida manual o el autoguardado y reemplaza el estado actual por el cargado. */
+    public void cargarPartida() {
+        System.out.println("1. Partida guardada (partida.dat)  2. Autoguardado (autoguardado.dat)  0. Cancelar");
+        int opcion = consola.leerEntero("Cargar: ", 0, 2);
+        if (opcion == 0) {
+            return;
+        }
+        File origen = opcion == 1 ? GestorArchivos.ARCHIVO_PARTIDA : GestorArchivos.ARCHIVO_AUTOGUARDADO;
+        Optional<PartidaGuardada> leida = GestorPartida.cargar(origen);
+        if (leida.isEmpty()) {
+            return;                                   // GestorPartida ya explico el motivo; el juego sigue
+        }
+        PartidaGuardada partida = leida.get();
+        synchronized (candadoEstado) {
+            perfil = partida.getPerfil();
+            gremio = partida.getGremio();
+            bestiario.importarDerrotados(partida.getDerrotados());
+            partidaCargada = true;
+            System.out.printf("Partida cargada (guardada el %s).%n", partida.getFecha());
+            System.out.printf("Victorias: %d | Derrotas: %d | Logros: %s%n",
+                    perfil.getVictorias(), perfil.getDerrotas(), perfil.getLogros());
+            System.out.printf("Gremio %s: %d miembros%n", gremio.getNombre(), gremio.getMiembros().size());
+            for (Personaje miembro : gremio.getMiembros()) {
+                System.out.printf("  - %s (%s) vida %d/%d, estado %s, %d pociones%n", miembro.getNombre(),
+                        miembro.getTipo(), miembro.getVida(), miembro.getVidaMaxima(), miembro.getEstado(),
+                        miembro.getInventario().tamanio());
+            }
+            System.out.println("Enemigos derrotados: " + bestiario.resumenDerrotados());
+        }
+    }
+
+    public void mostrarInfoArchivos() {
+        System.out.println("\n=== ARCHIVOS DEL JUEGO ===");
+        System.out.println("Directorio de trabajo: " + System.getProperty("user.dir"));
+        System.out.println(GestorArchivos.describir(GestorArchivos.ARCHIVO_PARTIDA));
+        System.out.println(GestorArchivos.describir(GestorArchivos.ARCHIVO_AUTOGUARDADO));
+        System.out.println(GestorArchivos.describir(GestorArchivos.ARCHIVO_LOG));
+    }
+
+    /** Borra la partida guardada o el historial, siempre confirmando antes. */
+    public void borrarArchivos() {
+        System.out.println("1. Partida guardada (manual y autoguardado)  2. Historial de combates  0. Cancelar");
+        int opcion = consola.leerEntero("Borrar: ", 0, 2);
+        if (opcion == 0 || !confirmar("Seguro que quieres borrarlo? No se puede deshacer.")) {
+            System.out.println("No se borro nada.");
+            return;
+        }
+        if (opcion == 1) {
+            File manual = GestorArchivos.ARCHIVO_PARTIDA;
+            if (!manual.exists()) {
+                System.out.println("No hay partida guardada manualmente.");
+            } else if (GestorArchivos.borrarConFile(manual)) {         // File.delete(): se revisa el boolean
+                System.out.println("Partida guardada borrada.");
+            } else {
+                System.out.println("No se pudo borrar " + manual.getPath() + " (permisos o archivo en uso).");
+            }
+            if (GestorArchivos.borrarConNio(GestorArchivos.ARCHIVO_AUTOGUARDADO)) {   // deleteIfExists
+                System.out.println("Autoguardado borrado.");
+            }
+        } else if (GestorArchivos.borrarConNio(GestorArchivos.ARCHIVO_LOG)) {
+            System.out.println("Historial borrado.");
+        } else {
+            System.out.println("No habia historial que borrar.");
+        }
+    }
+
+    private boolean confirmar(String pregunta) {
+        return consola.leerLinea(pregunta + " (s/n): ").equalsIgnoreCase("s");
+    }
+
+    /** Al salir: espera a que el daemon termine una escritura en curso y evita que empiece otra. */
+    public void cerrar() {
+        GestorPartida.cerrar();
     }
 
     public String getUltimoGuardado() {

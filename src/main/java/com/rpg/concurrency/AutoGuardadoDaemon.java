@@ -2,17 +2,6 @@ package com.rpg.concurrency;
 
 import com.rpg.core.MotorJuego;
 
-/**
- * TALLER CONCURRENCIA (Seccion 4): auto-guardado periodico en segundo plano.
- *
- * Corre en un hilo DAEMON: no impide que la JVM termine. Cuando el jugador sale del juego y el
- * hilo principal acaba, la JVM se cierra aunque este bucle siga "vivo" (while (true)).
- * Por eso setDaemon(true) se llama ANTES de start(); despues de start() lanza
- * IllegalThreadStateException.
- *
- * En esta etapa el guardado es en MEMORIA (MotorJuego.autoGuardar()). El taller de archivos
- * lo lleva a disco.
- */
 public class AutoGuardadoDaemon implements Runnable {
 
     private final MotorJuego motor;
@@ -43,9 +32,10 @@ public class AutoGuardadoDaemon implements Runnable {
             try {
                 Thread.sleep(intervaloMs);
                 motor.autoGuardar();
+                motor.autoGuardarEnDisco();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                break;                                   // alguien pidio detener el guardado
+                break;
             }
         }
     }

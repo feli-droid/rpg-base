@@ -7,6 +7,9 @@ import com.rpg.exceptions.SinManaException;
 import com.rpg.items.Inventario;
 import com.rpg.items.Pocion;
 
+import java.io.IOException;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -18,17 +21,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
-/**
- * Personaje del juego (clase abstracta).
- *
- * TALLER CONCURRENCIA:
- *  - Los efectos DoT / HoT ya no se procesan "por turnos": cada efecto activo corre en su propio
- *    hilo (EfectoContinuoTask) que se cancela con interrupt().
- *  - Varios hilos pueden tocar a la vez la vida, el estado y los efectos del mismo personaje
- *    (un veneno, un ataque, una curacion continua...). Para evitar la condicion de carrera, todas
- *    las operaciones que leen y escriben esas variables son synchronized sobre el propio personaje.
- */
-public abstract class Personaje implements ICombatiente {
+public abstract class Personaje implements ICombatiente, Serializable {
+
+    /** TALLER ARCHIVOS: version de la clase serializada; si cambian los campos, se sube este numero. */
+    private static final long serialVersionUID = 1L;
 
     private static final int VIDA_BASE = 100;
     private static final int ATAQUE_BASE = 10;
@@ -52,9 +48,10 @@ public abstract class Personaje implements ICombatiente {
     private final Set<String> habilidades = new HashSet<>();
     // Estado compartido entre hilos: solo se toca dentro de metodos synchronized.
     private final Map<String, EstadoEfecto> efectos = new LinkedHashMap<>();
-    private final Map<String, Thread> hilosEfectos = new HashMap<>();
+    // transient: no se guarda. Al cargar vale null y se vuelve a crear vacio al usarse (ver hilos()).
+    private transient Map<String, Thread> hilosEfectos = new HashMap<>();
     /** Quien recibe los mensajes de los efectos (el registro de combate). null = consola. */
-    private volatile Consumer<String> observador;
+    private transient volatile Consumer<String> observador;
 
     protected Personaje(String nombre, TipoPersonaje tipo) {
         this(nombre, tipo, VIDA_BASE, ATAQUE_BASE, DEFENSA_BASE);
@@ -100,10 +97,6 @@ public abstract class Personaje implements ICombatiente {
         recibirDanio(Math.max(DANIO_MINIMO, danioFinal));
     }
 
-    // ------------------------------------------------------------------------------------
-    // Vida (seccion 6 del taller: condicion de carrera)
-    // ------------------------------------------------------------------------------------
-
     /**
      * Resta vida. synchronized: "leer vida, restar, escribir vida (y quiza cambiar estado)" son
      * varios pasos que juntos deben ser UNA sola operacion indivisible. Sin esto, un veneno y un
@@ -145,10 +138,6 @@ public abstract class Personaje implements ICombatiente {
         return estado != EstadoPersonaje.MUERTO;
     }
 
-    // ------------------------------------------------------------------------------------
-    // Efectos continuos: cada efecto activo es un hilo
-    // ------------------------------------------------------------------------------------
-
     /** Quien recibe los avisos de los efectos (ticks, fin, muerte). Normalmente el RegistroCombate. */
     public void setObservador(Consumer<String> observador) {
         this.observador = observador;
@@ -180,7 +169,7 @@ public abstract class Personaje implements ICombatiente {
         Thread hilo = new Thread(new EfectoContinuoTask(this, propio, INTERVALO_EFECTO_MS),
                 "efecto-" + propio.getNombre() + "-" + nombre);
         hilo.setDaemon(true);          // un efecto olvidado no debe impedir que la JVM termine
-        hilosEfectos.put(propio.getNombre(), hilo);
+        hilos().put(propio.getNombre(), hilo);
         hilo.start();                  // siempre un Thread nuevo: nunca se llama start() dos veces
     }
 
@@ -213,8 +202,8 @@ public abstract class Personaje implements ICombatiente {
     public void cancelarEfectos() {
         List<Thread> pendientes;
         synchronized (this) {
-            pendientes = new ArrayList<>(hilosEfectos.values());
-            hilosEfectos.clear();
+            pendientes = new ArrayList<>(hilos().values());
+            hilos().clear();
             efectos.clear();
             normalizarEstado();
             for (Thread hilo : pendientes) {
@@ -293,13 +282,40 @@ public abstract class Personaje implements ICombatiente {
 
     /** Lo llama el hilo del efecto al terminar (finally): se desregistra a si mismo. */
     public synchronized void liberarHilo(EstadoEfecto efecto) {
-        if (hilosEfectos.get(efecto.getNombre()) == Thread.currentThread()) {
-            hilosEfectos.remove(efecto.getNombre());
+        if (hilos().get(efecto.getNombre()) == Thread.currentThread()) {
+            hilos().remove(efecto.getNombre());
         }
     }
 
+    /** Mapa de hilos de efecto; tras deserializar el campo transient es null y se recrea vacio. */
+    private Map<String, Thread> hilos() {
+        if (hilosEfectos == null) {
+            hilosEfectos = new HashMap<>();
+        }
+        return hilosEfectos;
+    }
+
+    public synchronized void reanudarEfectos() {
+        if (!estaVivo()) {
+            return;
+        }
+        for (EstadoEfecto efecto : new ArrayList<>(efectos.values())) {
+            if (!hilos().containsKey(efecto.getNombre()) && !efecto.haTerminado()) {
+                Thread hilo = new Thread(new EfectoContinuoTask(this, efecto, INTERVALO_EFECTO_MS),
+                        "efecto-" + efecto.getNombre() + "-" + nombre);
+                hilo.setDaemon(true);
+                hilos().put(efecto.getNombre(), hilo);
+                hilo.start();
+            }
+        }
+    }
+
+    private synchronized void writeObject(ObjectOutputStream salida) throws IOException {
+        salida.defaultWriteObject();
+    }
+
     private void interrumpirHilo(String nombreEfecto) {
-        Thread hilo = hilosEfectos.remove(nombreEfecto);
+        Thread hilo = hilos().remove(nombreEfecto);
         if (hilo != null) {
             hilo.interrupt();
         }
@@ -307,7 +323,7 @@ public abstract class Personaje implements ICombatiente {
 
     /** Cantidad de hilos de efecto registrados (sirve para comprobar que terminan limpios). */
     public synchronized int cantidadHilosEfecto() {
-        return hilosEfectos.size();
+        return hilos().size();
     }
 
     private boolean tieneEfectoDanio() {
@@ -324,10 +340,6 @@ public abstract class Personaje implements ICombatiente {
             estado = EstadoPersonaje.VIVO;
         }
     }
-
-    // ------------------------------------------------------------------------------------
-    // Aturdimiento, pociones, equipo, gremio
-    // ------------------------------------------------------------------------------------
 
     public synchronized void aturdir() {
         if (estaVivo()) {
@@ -389,10 +401,6 @@ public abstract class Personaje implements ICombatiente {
     public boolean aprenderHabilidad(String habilidad) {
         return habilidades.add(habilidad);
     }
-
-    // ------------------------------------------------------------------------------------
-    // Getters / setters (validados)
-    // ------------------------------------------------------------------------------------
 
     /** Nunca baja de 0 ni supera la vida maxima; al llegar a 0 el personaje muere. */
     public synchronized void setVida(int vida) {

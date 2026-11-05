@@ -2,14 +2,11 @@ package com.rpg.entities;
 
 import com.rpg.entities.enums.TipoEfecto;
 
-/**
- * Efecto continuo (DoT / HoT) aplicado a un personaje.
- *
- * TALLER CONCURRENCIA: ahora lo consume un hilo (EfectoContinuoTask) mientras otro hilo puede
- * estar mostrandolo por pantalla, por eso los metodos que tocan "turnosRestantes" son synchronized.
- * "turnosRestantes" cuenta los ticks que le quedan al efecto.
- */
-public class EstadoEfecto {
+import java.io.Serializable;
+
+public class EstadoEfecto implements Serializable {
+
+    private static final long serialVersionUID = 1L;
 
     private final String nombre;
     private final TipoEfecto tipo;

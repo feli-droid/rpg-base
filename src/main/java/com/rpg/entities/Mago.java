@@ -7,6 +7,8 @@ import com.rpg.exceptions.SinManaException;
 
 public class Mago extends Personaje {
 
+    private static final long serialVersionUID = 1L;
+
     private static final int VIDA = 80;
     private static final int ATAQUE = 14;
     private static final int DEFENSA = 3;
@@ -15,6 +17,7 @@ public class Mago extends Personaje {
     private static final int REGENERACION_MANA = 5;
     private static final double MULTIPLICADOR_ESPECIAL = 1.5;
     private static final String NOMBRE_ESPECIAL = "Bola de Fuego";
+    /** Plantilla del efecto: es estatica, por eso no se serializa (cada personaje guarda sus copias). */
     private static final EstadoEfecto QUEMADURA = new EstadoEfecto("Quemadura", TipoEfecto.DANIO_CONTINUO, 4, 3);
 
     private int mana;
@@ -35,7 +38,6 @@ public class Mago extends Personaje {
         mana = Math.min(MANA_MAXIMO, mana + REGENERACION_MANA);
     }
 
-    /** Bola de Fuego: ignora la defensa del objetivo y lo deja ardiendo (DoT). */
     @Override
     public String realizarAtaqueEspecial(Personaje objetivo) throws SinManaException {
         if (mana < COSTO_MANA_ESPECIAL) {

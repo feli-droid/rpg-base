@@ -4,7 +4,10 @@ import com.rpg.entities.enums.RaridadItem;
 import com.rpg.entities.enums.TipoPersonaje;
 import com.rpg.exceptions.VidaInsuficienteException;
 
+/** Guerrero: mucha vida y defensa; su habilidad especial cuesta vida propia. */
 public class Guerrero extends Personaje {
+
+    private static final long serialVersionUID = 1L;
 
     private static final int VIDA = 120;
     private static final int ATAQUE = 18;
@@ -32,7 +35,6 @@ public class Guerrero extends Personaje {
         return super.getDefensa() + fuerzaEscudo;
     }
 
-    /** Golpe Brutal: pega el doble a cambio de sacrificar vida propia. */
     @Override
     public String realizarAtaqueEspecial(Personaje objetivo) {
         if (getVida() <= COSTO_VIDA_ESPECIAL) {
