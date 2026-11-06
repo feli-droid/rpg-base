@@ -25,6 +25,21 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 
+/**
+ * Flujo del juego: crear heroe, bucle de combate, resultado y guardado del progreso.
+ *
+ * TALLER CONCURRENCIA:
+ *  - pedirAccion() usa un temporizador de turno en su propio hilo (GestorTurno).
+ *  - Los efectos DoT / HoT corren en hilos; el combate los cancela al terminar.
+ *  - Un hilo daemon (AutoGuardadoDaemon) guarda el progreso en memoria cada cierto tiempo, por eso
+ *    el estado compartido (perfil, gremio, bestiario) se toca siempre con el candado "candadoEstado".
+ *
+ * TALLER ARCHIVOS:
+ *  - Al terminar un combate o torneo, el registro se agrega a partidas/combate.log (LogCombate).
+ *  - Guardar / cargar partida: serializacion de PartidaGuardada a partidas/partida.dat (GestorPartida).
+ *  - El daemon tambien escribe a disco (partidas/autoguardado.dat), en un archivo APARTE para no pisar
+ *    nunca la partida que el jugador guardo a proposito.
+ */
 public class MotorJuego {
 
     private static final String NOMBRE_GREMIO = "Guardianes del Alba";
@@ -54,9 +69,32 @@ public class MotorJuego {
         this.consola = consola;
     }
 
+    // ------------------------------------------------------------------------------------
+    // Opciones del menu
+    // ------------------------------------------------------------------------------------
+
     public void combateRapido() {
         registro.limpiar();
-        Personaje jugador = elegirOCrearHeroe();
+        jugarCombate(elegirOCrearHeroe());
+    }
+
+    /**
+     * UNIDAD 5.2 (integracion con la BD): combate rapido con un heroe que ya viene creado, por ejemplo uno cargado
+     * desde MySQL. Recibe un Personaje (entidad del juego), asi el motor no sabe nada de bases de datos.
+     */
+    public void combateRapido(Personaje heroe) {
+        registro.limpiar();
+        entregarKitInicial(heroe);
+        synchronized (candadoEstado) {
+            heroe.unirseAGremio(gremio);
+            System.out.printf("%s se une al gremio %s (%d miembros).%n",
+                    heroe.getNombre(), gremio.getNombre(), gremio.getMiembros().size());
+        }
+        jugarCombate(heroe);
+    }
+
+    /** Elige rival y juega el combate completo con el heroe indicado. */
+    private void jugarCombate(Personaje jugador) {
         Enemigo enemigo = elegirEnemigo();
         jugador.reanudarEfectos();      // si el heroe se guardo con un efecto activo, vuelve a correr
         jugador.setObservador(registro::agregar);
@@ -101,6 +139,14 @@ public class MotorJuego {
         }
     }
 
+    // ------------------------------------------------------------------------------------
+    // Creacion del heroe y del rival
+    // ------------------------------------------------------------------------------------
+
+    /**
+     * TALLER ARCHIVOS: tras cargar una partida se puede continuar con un heroe del gremio guardado
+     * (con su vida, pociones, arma y efectos tal como se guardaron) o crear uno nuevo.
+     */
     private Personaje elegirOCrearHeroe() {
         List<Personaje> disponibles = new ArrayList<>();
         synchronized (candadoEstado) {
@@ -179,6 +225,11 @@ public class MotorJuego {
         }
     }
 
+    // ------------------------------------------------------------------------------------
+    // Bucle de combate
+    // ------------------------------------------------------------------------------------
+
+    /** @return true si el jugador huyo. */
     private boolean combatir(Personaje jugador, Enemigo enemigo) {
         int ronda = 1;
         while (jugador.estaVivo() && enemigo.estaVivo()) {
@@ -225,6 +276,13 @@ public class MotorJuego {
         return false;
     }
 
+    /**
+     * TALLER CONCURRENCIA (Seccion 1): pide la accion con un temporizador de SEGUNDOS_TURNO segundos.
+     *
+     * El temporizador corre en otro hilo mientras este hilo espera al teclado (nextLine() no se puede
+     * interrumpir). Si el jugador responde a tiempo, se cancela el temporizador con interrupt(). Si el
+     * tiempo se agota primero, el turno se pierde en cuanto el jugador pulse ENTER.
+     */
     private Accion pedirAccion() {
         System.out.printf("1. Atacar  2. Habilidad especial  3. Usar pocion  4. Ver estado  0. Huir"
                 + "  (tienes %d s)%n", SEGUNDOS_TURNO);
@@ -277,6 +335,10 @@ public class MotorJuego {
         }
     }
 
+    // ------------------------------------------------------------------------------------
+    // Resultado del combate
+    // ------------------------------------------------------------------------------------
+
     private void cerrarCombate(Personaje jugador, Enemigo enemigo, boolean huyo) {
         synchronized (candadoEstado) {
             if (huyo) {
@@ -314,6 +376,14 @@ public class MotorJuego {
         }
     }
 
+    // ------------------------------------------------------------------------------------
+    // Guardado (en memoria)
+    // ------------------------------------------------------------------------------------
+
+    /**
+     * TALLER CONCURRENCIA (Seccion 4): arranca el hilo daemon de auto-guardado.
+     * Lo llama Main una sola vez al empezar.
+     */
     public Thread iniciarAutoGuardado() {
         return new AutoGuardadoDaemon(this, INTERVALO_AUTOGUARDADO_MS).iniciar();
     }
@@ -328,6 +398,10 @@ public class MotorJuego {
         guardarEnMemoria("[Autoguardado en memoria]");
     }
 
+    /**
+     * TALLER ARCHIVOS (Seccion 7): guardado automatico en DISCO, tambien desde el hilo daemon.
+     * No escribe nada si todavia no hay progreso (para no dejar un autoguardado vacio).
+     */
     public void autoGuardarEnDisco() {
         boolean escrito;
         synchronized (candadoEstado) {
@@ -370,6 +444,10 @@ public class MotorJuego {
         sb.append(registro.getTexto());
         return sb.toString();
     }
+
+    // ------------------------------------------------------------------------------------
+    // TALLER ARCHIVOS: historial, guardar, cargar, informacion y borrado
+    // ------------------------------------------------------------------------------------
 
     /** Agrega el registro del combate que acaba de terminar al historial en disco. */
     private void guardarHistorial() {
