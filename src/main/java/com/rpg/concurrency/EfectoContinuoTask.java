@@ -3,14 +3,6 @@ package com.rpg.concurrency;
 import com.rpg.entities.EstadoEfecto;
 import com.rpg.entities.Personaje;
 
-/**
- * TALLER CONCURRENCIA (Seccion 2): un efecto continuo (DoT o HoT) corriendo en su propio hilo.
- *
- * Cada cierto intervalo (en milisegundos) aplica un tick de dano o de curacion sobre el Personaje.
- * Termina por tres caminos: se le acaban los ticks, el personaje muere, o alguien llama a
- * interrupt() sobre su hilo (antidoto, purificacion, fin del combate o efecto reemplazado).
- * No se usa Thread.stop() ni banderas booleanas: la cancelacion es SIEMPRE por interrupcion.
- */
 public class EfectoContinuoTask implements Runnable {
 
     private final Personaje objetivo;

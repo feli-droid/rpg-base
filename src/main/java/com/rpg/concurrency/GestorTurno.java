@@ -2,14 +2,6 @@ package com.rpg.concurrency;
 
 import com.rpg.core.TurnoCallback;
 
-/**
- * TALLER CONCURRENCIA (Seccion 1): crea y controla el hilo del temporizador de UN turno.
- *
- * - iniciar(): crea un Thread NUEVO con el Runnable y llama a start() (un Thread no se puede
- *   arrancar dos veces, por eso cada turno usa uno distinto).
- * - cancelar(): interrumpe el hilo con interrupt() y espera a que termine (sin banderas manuales).
- * - Como implementa TurnoCallback, es quien se entera de que el tiempo se agoto.
- */
 public class GestorTurno implements TurnoCallback {
 
     private Thread hilo;

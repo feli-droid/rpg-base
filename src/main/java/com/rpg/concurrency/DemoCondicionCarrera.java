@@ -6,35 +6,6 @@ import com.rpg.entities.Personaje;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
-/**
- * TALLER CONCURRENCIA (Seccion 6 e "Investigacion obligatoria"): reproduce y resuelve la condicion
- * de carrera en la vida de un personaje. Se ejecuta con:  java -cp out com.rpg.concurrency.DemoCondicionCarrera
- *
- * 1) VidaInsegura: copia del codigo ORIGINAL de Personaje.recibirDanio (leer, calcular, escribir sin
- *    proteccion). Dos hilos hacen la misma cantidad de danio y se pierden actualizaciones.
- * 2) Personaje real: recibirDanio es synchronized, el resultado es exacto.
- * 3) VidaConReentrantLock: recibirDanio reescrito con lock()/unlock() dentro de try-finally.
- * 4) AtomicInteger: por que addAndGet(-danio) NO basta aqui.
- *
- * -----------------------------------------------------------------------------------------------
- * POR QUE synchronized ES EL MECANISMO PRINCIPAL
- *   recibirDanio no es una sola operacion: lee vida, resta, acota a 0..vidaMaxima y, si llega a 0,
- *   cambia "estado" a MUERTO. Son VARIAS variables dependientes entre si. synchronized convierte todo
- *   ese bloque en una unidad indivisible y ademas se libera solo, incluso si hay una excepcion.
- *
- * POR QUE AtomicInteger.addAndGet(-danio) NO BASTA
- *   Es atomico solo para UN entero. No acota la vida (puede quedar en negativo) y no puede cambiar
- *   "estado" en el mismo paso: entre el addAndGet y el cambio de estado otro hilo ve una vida 0 con
- *   estado VIVO. (Reto extra: updateAndGet(v -> Math.max(0, v - danio)) o un bucle con compareAndSet
- *   si arreglan el acotado, pero "estado" sigue siendo una segunda variable fuera de la operacion.)
- *
- * CUANDO PREFERIRIA ReentrantLock A synchronized
- *   Cuando necesito algo que synchronized no ofrece: tryLock() (no quedarme bloqueado), lockInterruptibly()
- *   (poder cancelar la espera con interrupt()), un lock "justo" (fair) o varias Condition en un mismo
- *   candado. A cambio, la responsabilidad es mia: si el unlock() no esta en el finally, una excepcion
- *   deja el lock tomado para siempre y el programa se bloquea.
- * -----------------------------------------------------------------------------------------------
- */
 public class DemoCondicionCarrera {
 
     private static final int VIDA_INICIAL = 1_000_000;

@@ -2,14 +2,6 @@ package com.rpg.concurrency;
 
 import com.rpg.core.TurnoCallback;
 
-/**
- * TALLER CONCURRENCIA (Seccion 1): cuenta regresiva de un turno.
- *
- * Es un Runnable (la tarea), no un Thread: quien la use decide en que hilo correrla.
- * Hace una cuenta regresiva de un segundo por iteracion y, si llega a 0 sin que nadie la
- * haya interrumpido, avisa por el callback. Si el jugador responde a tiempo, el motor llama
- * a interrupt() sobre el hilo: el sleep lanza InterruptedException y la tarea termina sin avisar.
- */
 public class TemporizadorTurnoTask implements Runnable {
 
     private static final long UN_SEGUNDO_MS = 1000;

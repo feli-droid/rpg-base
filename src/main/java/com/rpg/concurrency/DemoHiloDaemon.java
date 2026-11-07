@@ -1,22 +1,5 @@
 package com.rpg.concurrency;
 
-/**
- * TALLER CONCURRENCIA (Investigacion obligatoria: hilos daemon).
- * Se ejecuta con:  java -cp out com.rpg.concurrency.DemoHiloDaemon
- *
- * Que demuestra:
- *  1) La JVM se cierra aunque el hilo daemon siga vivo (su bucle es infinito y el programa termina igual).
- *  2) setDaemon(true) DESPUES de start() lanza IllegalThreadStateException.
- *  3) Un hilo de usuario SI mantiene viva la JVM: el programa espera a que termine.
- *
- * DIFERENCIA ENTRE HILO DE USUARIO Y HILO DAEMON
- *   - Hilo de usuario (por defecto): la JVM no termina mientras quede al menos uno vivo, aunque el
- *     main ya haya acabado. Sirve para trabajo que DEBE completarse (un combate, una escritura).
- *   - Hilo daemon: es un servicio de fondo. Cuando solo quedan hilos daemon, la JVM se cierra y los
- *     mata sin avisar (no hay finally ni limpieza garantizada). Sirve para tareas prescindibles como el
- *     auto-guardado periodico o un monitor; no debe hacer nada que no pueda interrumpirse en cualquier
- *     momento.
- */
 public class DemoHiloDaemon {
 
     public static void main(String[] args) {
